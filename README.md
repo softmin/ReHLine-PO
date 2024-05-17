@@ -1,2 +1,2 @@
 # ReHLine-PO
-A ReHLine-based C++ and Python library aiming to be a fast Portfolio Optimization solver.
+Fast mini-Portfolio Optimization solver fueled by [https://github.com/softmin/ReHLine-python](ReHLine-python).
