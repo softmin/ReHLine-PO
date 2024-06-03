@@ -1,2 +1,2 @@
 # ReHLine-PO
-Fast mini-Portfolio Optimization solver fueled by [https://github.com/softmin/ReHLine-python](ReHLine-python).
+Fast mini-Portfolio Optimization solver fueled by [ReHLine-python](https://github.com/softmin/ReHLine-python).
