@@ -17,7 +17,7 @@ class MeanVariance(Portfolio):
                  w_prev: np.ndarray = None,
                  buy_cost: float = None,
                  sell_cost: float = None,
-                 transaction_cost: Dict = None):
+                 transaction_costs: List[PLQLoss] = None):
         self.mu = mu
         self.cov = cov
         self.n_assets = len(self.mu)
@@ -29,7 +29,7 @@ class MeanVariance(Portfolio):
         self.w_prev = w_prev if w_prev is not None else np.zeros(self.n_assets)
         self.buy_cost = buy_cost
         self.sell_cost = sell_cost
-        self.transaction_cost = transaction_cost
+        self.transaction_costs = transaction_costs
         if self.cov_sqrt:
             assert np.isclose(2.0*LA.norm(self.cov_sqrt @ self.cov_sqrt.T - self.cov)
                                 / (LA.norm(self.cov_sqrt @ self.cov_sqrt.T) + LA.norm(self.cov)), 1e-4), \
@@ -50,6 +50,13 @@ class MeanVariance(Portfolio):
         A_tilde = self.A @ X
         mu_tilde = X.T @ self.mu
 
+
+        # print("C:", risk_aversion)
+        # print("A:", A_tilde)
+        # print("b:", self.b)
+        # print("U:", self.U)
+        # print("V:", self.V)
+        # print("mu:", mu_tilde)
         self._optimizer = ReHLineLinear(
             C=risk_aversion, 
             A=A_tilde, 
@@ -79,7 +86,7 @@ class MeanVariance(Portfolio):
 
 
     def _construct_relu_coefs(self) -> Tuple[np.ndarray, np.ndarray]:
-        if self.buy_cost is None and self.transaction_cost is None and self.sell_cost is None:
+        if self.buy_cost is None and self.transaction_costs is None and self.sell_cost is None:
             return np.zeros(shape=(0,0)), np.zeros(shape=(0,0))
         if self.buy_cost is not None and self.sell_cost is not None:
             sell_cost = self.sell_cost * np.ones(self.n_assets)
@@ -89,7 +96,7 @@ class MeanVariance(Portfolio):
                      'c': np.array([0., 0.])
                      }, 
                     cutpoints=np.array([0.])) for i in range(self.n_assets)]
-        elif self.transaction_cost is not None:
+        elif self.transaction_costs is not None:
             plqs = self.transaction_costs
         else:
             raise TypeError("Invalid argument for transaction costs. \
