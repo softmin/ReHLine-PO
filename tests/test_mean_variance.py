@@ -44,7 +44,7 @@ A = np.r_[np.c_[np.ones(n), np.ones(n)*-1.0].T, np.eye(n)]
 b = np.r_[-1.0, 1.0, np.zeros(n)]
 tol = 1e-6
 
-pf = MeanVariance(mu, S, A, b, w_prev=initial_weights, buy_cost=transaction_cost, sell_cost=transaction_cost)
+pf = MeanVariance(mu, S.to_numpy(), A, b, w_prev=initial_weights, buy_cost=transaction_cost, sell_cost=transaction_cost)
 weights_rehlinepo = pf.max_quad_util_portf(tol=tol, risk_aversion=risk_aversion)
 print("Solution provided by ReHLine: ", weights_rehlinepo)
 print("L2 distance between solutions", LA.norm(weights_rehlinepo - weights_pyportf))
