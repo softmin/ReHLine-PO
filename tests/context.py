@@ -2,4 +2,4 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('..'))
 
-from rehline_po import MeanVariance, FactorModel
+from rehline_po import MeanVariance

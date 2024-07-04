@@ -2,7 +2,7 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.getcwd()))
 import time
-from typing import Iterable, Union, Tuple
+from typing import Iterable, Union, Tuple, List
 
 import mosek
 from mosek.fusion import *
@@ -24,130 +24,84 @@ from pypfopt import expected_returns, risk_models
 from pypfopt import EfficientFrontier, objective_functions
 
 
-def random_sparse_spd_matrix(
-    dim: int,
-    density: float,
-    chol_entry_min: float = 0.1,
-    chol_entry_max: float = 1.0,
-) -> np.ndarray:
-    """Generate random sparse semi positive-definite matrix"""
-    if not 0 <= density <= 1:
-        raise ValueError(f"Density must be between 0 and 1, but is {density}.")
-    G = np.eye(dim)
-    num_elements = int(dim * dim)
-    num_nonzero_entries = int(num_elements * density)
-
-    if num_nonzero_entries > 0:
-        # Draw entries of lower triangle (below diagonal) according to sparsity level
-        idx_samples = np.random.choice(
-            a=dim*dim, size=num_nonzero_entries, replace=False
-        )
-        nonzero_entry_ids = (idx_samples % dim, idx_samples // dim)
-
-        # Fill Cholesky factor
-        G[nonzero_entry_ids] = np.random.uniform(
-            low=chol_entry_min, high=chol_entry_max, size=num_nonzero_entries
-        )
-
-    return G @ G.T
-
-
-def eval_quad_util(w, N, mu, cov, risk_aversion, vp, vm):
-    return 0.5*risk_aversion*(w.T @ cov @ w) - mu.T @ w + np.where(w > 0, w*vp, -w*vm).sum()
-
-
 def rel_diff(x: np.ndarray, y: np.ndarray):
     return 2.0*LA.norm(x - y) / (LA.norm(x) + LA.norm(y))
 
 
-def max_meanstdrisk_util_portf_mosek(N, mu, G, risk_aversion=1.0, vp=0.0, vm=0.0, 
-                                     lb=0.0, ub=None, tol=1e-6):
-    """Optimizes the problem:
-        min_x 1/2*sqrt{x'Sx} - m'x + sum_i \phi_i(x_i)
-            s.t. lb <= x <= ub & x'1 = 1
-        where \phi_i(y) = vp_i*y if y >= 0 else vm_i*y
-    """
-    with Model("Case study") as M:   
-        # Model settings
-        M.setSolverParam("intpntCoTolRelGap", tol)
-        # Real variables
-        if lb is None and ub is None: 
-            x = M.variable("x", N, Domain.unbounded())
-        elif lb is None:
-            x = M.variable("x", N, Domain.lowerThan(ub))
-        elif ub is None:
-            x = M.variable("x", N, Domain.greaterThan(lb))
-        else:
-            x = M.variable("x", N, Domain.inRange(lb, ub))
-        xp = M.variable("xp", N, Domain.greaterThan(0.0))
-        xm = M.variable("xm", N, Domain.greaterThan(0.0))
-        s = M.variable("s", 1, Domain.unbounded())
-        
-        # Constraint assigning xp and xm to the pos. and neg. part of x.
-        M.constraint('pos-neg-part', Expr.sub(x, Expr.sub(xp, xm)),
-                   Domain.equalsTo(0.0))
-        
-        # Conic constraint for the portfolio variance
-        M.constraint('risk', Expr.vstack(s, Expr.mul(G.T, x)), Domain.inQCone())
-        
-        # Budget constraint
-        M.constraint('budget', Expr.sum(x), Domain.equalsTo(1.0))
-        
-        # Objective (quadratic utility version)
-        delta = M.parameter()
-        delta.setValue(risk_aversion)
-        varcost_terms = Expr.add([Expr.dot(vp, xp), Expr.dot(vm, xm)])
-        M.objective('obj', ObjectiveSense.Maximize, Expr.sub(
-            Expr.sub(Expr.dot(mu, x), varcost_terms), Expr.mul(delta, s)))
+def random_mu(N):
+    return np.random.uniform(low=-0.5, high=0.5, size=N)
 
-        M.solve()
-        portfolio_weights = x.level()
-    return portfolio_weights
 
+def random_beta(N, F):
+    return np.random.uniform(low=-0.5, high=0.5, size=(N, F))
+
+
+def dense_random_cov(N):
+    C = np.random.uniform(low=-0.5, high=0.5, size=(N, N))
+    return C.T @ C
+        
 
 def max_quad_util_portf_pyportf(N, mu, cov, risk_aversion=1.0, transaction_cost=0.0, 
                                 lb=None, ub=None, tol=1e-6, debug=False):
-    # Solution provided by PyPortfolio
+    """Solves mean-variance problem with transaction cost with PyportfolioOpt"""
     ef = EfficientFrontier(mu, cov, weight_bounds=(lb, ub))
     ef.add_objective(objective_functions.transaction_cost, w_prev=np.zeros(N), k=transaction_cost)
     ef.max_quadratic_utility(risk_aversion=risk_aversion)
     weights_pyportf = np.array(list(ef.clean_weights().values()))
     return weights_pyportf
+    
 
-
-def max_quad_util_portf_gurobi_fm(mu, beta, Psi, risk_aversion, 
-                            buy_cost, sell_cost,lb, ub):
+def max_quad_util_portf_gurobi_plq(mu, cov, risk_aversion, transaction_costs, lb, ub):
+    """Solves mean-variance problem with transaction cost with Gurobi"""
     with gp.Model() as m:
         m.Params.OutputFlag = 0
-        n_assets, n_factors = beta.shape[0], beta.shape[1]
+        n_assets = len(mu)
+        L = (len(transaction_costs[0].cutpoints) - 1) // 2
 
-        # variables
+        # dp[n][i]: length of i-th positive-side linear piece
+        # dm[n][i]: length of i-th negative-side linear piece
+        dp, dm = np.zeros((n_assets, L)), np.zeros((n_assets, L))
+        for i, transaction_cost in enumerate(transaction_costs):
+            dp_ = np.diff(transaction_cost.cutpoints[L:-1])
+            dm_ = np.diff(transaction_cost.cutpoints[1:L+1])[::-1]
+            dp[i, :(L-1)], dm[i, :(L-1)] = dp_, dm_
+        dp[:, L-1], dm[:, L-1] = np.ones(n_assets)*float("inf"), np.ones(n_assets)*float("inf")
+
+        # variables = [w, wp[0][0..L-1], ..., wp[N-1][0..L-1], wm[0][0..L-1], ..., wm[N-1][0..L-1]]
         w = m.addMVar(n_assets, lb=lb, ub=ub)
-        wp = m.addMVar(n_assets, lb=0.0, ub=np.max(ub, 0))
-        wm = m.addMVar(n_assets, lb=0.0, ub=np.max(-lb, 0))
-        y = m.addMVar(n_factors, lb=-float("inf"), ub=float("inf"))
+        # 0 <= wp[n][i] <= DP[n][i] if i < L-1 else 0 <= wp[n][i]
+        wp = m.addMVar((n_assets, L), lb=0.0, ub=dp)
+        # 0 <= wm[n][i] <= DM[n][i] if i < L-1 else 0 <= wm[n][i]
+        wm = m.addMVar((n_assets, L), lb=0.0, ub=dm)
         
         # constraints
         m.addConstr(w.sum() == 1)
-        m.addConstr(beta.T @ w - y == 0)
-        m.addConstr(w + wm - wp == 0)
+        m.addConstr(w + wm.sum(axis=1) - wp.sum(axis=1) == 0)
+
+        vp, vm = np.zeros((n_assets, L)), np.zeros((n_assets, L))
+        for i, transaction_cost in enumerate(transaction_costs):
+            vp[i, :] = np.array(transaction_cost.quad_coef['b'][L:])
+            vm[i, :] = np.array(-transaction_cost.quad_coef['b'][:L][::-1])
 
         # objective
         m.setObjective(
-            w @ mu - risk_aversion / 2.0 * y @ y - ((risk_aversion / 2.0 * Psi) * w**2).sum()
-                - (wp * buy_cost + wm * sell_cost).sum(),
+            w @ mu - risk_aversion / 2.0 * w @ cov @ w - (wp * vp + wm * vm).sum(),
             gp.GRB.MAXIMIZE,
         )
 
         m.optimize()
         return w.X
-    
+
 
 def max_quad_util_portf_gurobi_fm_plq(mu, beta, Psi, risk_aversion, 
-                                      transaction_costs: Union[Iterable, PLQLoss], 
-                                      lb, ub):
-    if isinstance(transaction_costs, PLQLoss):
-        transaction_costs = [transaction_costs] * len(mu)
+                                      transaction_costs: Iterable[PLQLoss], lb, ub):
+    """Mean-Variance with the assumption of Factor Modeled covariance using Gurobi
+
+    Optimization is based on 
+    https://gurobi-finance.readthedocs.io/en/latest/modeling_notebooks/factor_models_objective.html
+
+    Works extremely fast in practice.
+    """
     with gp.Model() as m:
         m.Params.OutputFlag = 0
         n_assets, n_factors = beta.shape[0], beta.shape[1]
@@ -190,27 +144,6 @@ def max_quad_util_portf_gurobi_fm_plq(mu, beta, Psi, risk_aversion,
         return w.X
 
 
-def max_quad_util_portf_rehline(N, mu, cov, 
-                                risk_aversion=1.0, vp=0.0, vm=0.0, 
-                                lb=None, ub=None, 
-                                max_iter=1000, tol=1e-6, verbose=False, trace_freq=100):
-    if lb is None and ub is None:
-        A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T]
-        b = np.r_[-1.0, 1.0]
-    elif lb is None:
-        A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T, -np.eye(N)]
-        b = np.r_[-1.0, 1.0, np.ones(N)*ub]
-    elif ub is None:
-        A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T, np.eye(N)]
-        b = np.r_[-1.0, 1.0, -np.ones(N)*lb]
-    else:
-        A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T, np.eye(N), -np.eye(N)]
-        b = np.r_[-1.0, 1.0, -np.ones(N)*lb, np.ones(N)*ub]
-    pf = MeanVariance(mu, cov, A, b, buy_cost=vp, sell_cost=vm)
-    weights_rehlinepo = pf.max_quad_util_portf(tol=tol, risk_aversion=risk_aversion, max_iter=max_iter, verbose=verbose, trace_freq=trace_freq)
-    return weights_rehlinepo, pf._optimizer
-
-
 # Since the actual value of Infinity is ignored, we define it solely
 # for symbolic purposes:
 inf = 0.0
@@ -221,156 +154,10 @@ def streamprinter(text):
     sys.stdout.write(text)
     sys.stdout.flush()
 
-    
-def max_quad_util_portf_mosek(N, mu, cov, risk_aversion=1.0, vp=0.0, vm=0.0, 
-                              lb=None, ub=None, tol=1e-6, debug=False):
-    # Open MOSEK and create an environment and task
-    # Make a MOSEK environment
-    with mosek.Env() as env:
-        # Attach a printer to the environment
-        env.set_Stream(mosek.streamtype.log, streamprinter)
-        # Create a task
-        with env.Task() as task:
-            # Set log level (integer parameter)
-            if not debug:
-                task.putintparam(mosek.iparam.log, 0)
-            else:
-                task.putintparam(mosek.iparam.log, 1)
-                
-
-            task.set_Stream(mosek.streamtype.log, streamprinter)
-            # Set up and input bounds and linear coefficients
-            numvar = 3*N
-            # variables = [x, x+, x-]
-
-            # lb <= x <= ub
-            if lb is None and ub is None:
-                bkx = [mosek.boundkey.fr]*N
-                blx = [-inf]*N
-                bux = [inf]*N
-            elif lb is None:
-                bkx = [mosek.boundkey.up]*N
-                blx = [-inf]*N
-                bux = [ub]*N
-            elif ub is None:
-                bkx = [mosek.boundkey.lo]*N
-                blx = [lb]*N
-                bux = [inf]*N
-            else:       
-                bkx = [mosek.boundkey.ra]*N
-                blx = [lb]*N
-                bux = [ub]*N
-            # x+ >= 0
-            bkx = bkx + [mosek.boundkey.lo]*N
-            blx = blx + [0]*N
-            bux = bux + [inf]*N
-            # x- >= 0
-            bkx = bkx + [mosek.boundkey.lo]*N
-            blx = blx + [0]*N
-            bux = bux + [inf]*N
-
-            # [1] x1+...+xN = 1
-            # [2..N+1] x+ - x- = x
-            bkc = [mosek.boundkey.fx]*(N+1)
-            blc = [1] + [0]*(N)
-            buc = [1] + [0]*(N)
-
-            # Note below matrix structure for constraints [1..N+1]
-            asub, aval = [], []
-            for j in range(3*N):
-                # j-th column
-                if j < N: 
-                    ids, vals = [0, j+1], [1.0, 1.0]
-                elif j < 2*N: 
-                    ids, vals = [j+1-N], [-1.0]
-                else: 
-                    ids, vals = [j+1-2*N], [1.0]
-                asub.append(ids)
-                aval.append(vals)
-
-            numvar = len(bkx)
-            numcon = len(bkc)
-
-            # Append 'numcon' empty constraints.
-            # The constraints will initially have no bounds.
-            task.appendcons(numcon)
-
-            # Append 'numvar' variables.
-            # The variables will initially be fixed at zero (x=0).
-            task.appendvars(numvar)
-
-            # linear term
-            c = np.r_[-mu/risk_aversion, vp/risk_aversion, vm/risk_aversion]
-
-            for j in range(numvar):
-                # Set the linear term c_j in the objective.
-                task.putcj(j, c[j])
-                # Set the bounds on variable j
-                # blx[j] <= x_j <= bux[j]
-                task.putvarbound(j, bkx[j], blx[j], bux[j])
-                # Input column j of A
-                task.putacol(j,                  # Variable (column) index.
-                             # Row index of non-zeros in column j.
-                             asub[j],
-                             aval[j])            # Non-zero Values of column j.
-            for i in range(numcon):
-                task.putconbound(i, bkc[i], blc[i], buc[i])
-
-            # Set up and input quadratic objective
-            qsubi = []
-            qsubj = []
-            qval = []
-            for i in range(N):
-                for j in range(i+1):
-                    qsubi.append(i)
-                    qsubj.append(j)
-                    qval.append(cov[i, j])
-            task.putqobj(qsubi, qsubj, qval)
-
-            # Input the objective sense (minimize/maximize)
-            task.putobjsense(mosek.objsense.minimize)
-
-            # Optimize
-            task.optimize()
-            # Print a summary containing information
-            # about the solution for debugging purposes
-            if debug:
-                task.solutionsummary(mosek.streamtype.msg)
-
-            prosta = task.getprosta(mosek.soltype.itr)
-            solsta = task.getsolsta(mosek.soltype.itr)
-
-            # Output a solution
-            res = task.getxx(mosek.soltype.itr)
-
-            if debug:
-                if solsta == mosek.solsta.optimal:
-                    print("Optimal solution: %s" % res)
-                elif solsta == mosek.solsta.dual_infeas_cer:
-                    print("Primal or dual infeasibility.\n")
-                elif solsta == mosek.solsta.prim_infeas_cer:
-                    print("Primal or dual infeasibility.\n")
-                elif mosek.solsta.unknown:
-                    print("Unknown solution status")
-                else:
-                    print("Other solution status")
-
-            return np.array(res[:N])
-
-
-# utility functions for the complex transaction cost experiment
-from plqcom import PLQLoss
-
-def random_mu(N):
-    return np.random.uniform(low=-0.5, high=0.5, size=N)
-
-
-def dense_random_cov(N):
-    C = np.random.uniform(low=-0.5, high=0.5, size=(N, N))
-    return C.T @ C
-    
 
 def determine_volume(N, risk_aversion=1.0):
+    """An attempt to estimate "cap volume" (max volume a stock can be) for the
+    simulated experiment."""
     n_tries = 100
     pos = np.zeros(n_tries)
     for _ in range(n_tries):
@@ -379,7 +166,7 @@ def determine_volume(N, risk_aversion=1.0):
     return pos.mean() * 100.0
 
 
-def create_plqloss_from_volume(V, L, vp, vm, d_vp, d_vm):
+def create_plqloss_from_volume(N, V, L, vp, vm, d_vp, d_vm) -> Iterable[PLQLoss]:
     """Creates PLQLoss object given total volume and #pieces
     
     Divides positive (and negative) parts of the function into `num_pieces`
@@ -399,37 +186,30 @@ def create_plqloss_from_volume(V, L, vp, vm, d_vp, d_vm):
             xm[i] = -i/L*V
             ym[i] = ym[i-1] - (xm[i] - xm[i-1])*(vm + d_vm*(i-1))
 
-        # remove (0, 0) since we have it in (xp, yp)
+        # remove (0, 0) since we have it in (xp, yp) # and reverse
         xm, ym = xm[1:], ym[1:]
-        # and reverse
         xm, ym = xm[::-1], ym[::-1]
-
         points = np.c_[np.r_[xm, xp], np.r_[ym, yp]]
         return PLQLoss(points=points, form="points")
 
     if isinstance(vp, Iterable) and isinstance(vm, Iterable) \
-        and isinstance(d_vp, Iterable) and isinstance(d_vm, Iterable):
+            and isinstance(d_vp, Iterable) and isinstance(d_vm, Iterable):
         plqlosses = []
         for _vp, _vm, _d_vp, _d_vm in zip(vp, vm, d_vp, d_vm):
             plqlosses.append(create_func(_vp, _vm, _d_vp, _d_vm))
         return plqlosses
     elif isinstance(vp, float) and isinstance(vm, float) \
-        and isinstance(d_vp, float) and isinstance(d_vm, float):
-        return create_func(vp, vm, d_vp, d_vm)
+            and isinstance(d_vp, float) and isinstance(d_vm, float):
+        return [create_func(vp, vm, d_vp, d_vm)]*N
     else:
         raise ValueError("Expected vp, vm, d_vp, d_vm to be either all iterable or floats.")
 
 # inf here doesn't hold numerical meaning
 inf = 0.0 
 
-def max_quad_util_portf_mosek_plq(N, mu, cov, transaction_costs: Union[Iterable, type[PLQLoss]],
+def max_quad_util_portf_mosek_plq(N, mu, cov, transaction_costs: Iterable[PLQLoss],
                                 risk_aversion=1.0, lb=None, ub=None, tol=1e-6, debug=False):
-    # Open MOSEK and create an environment and task
-    # Make a MOSEK environment
-
-    if isinstance(transaction_costs, PLQLoss):
-        transaction_costs = [transaction_costs]*len(mu)
-
+    """Solves mean-variance problem with transaction cost with MOSEK"""
     with mosek.Env() as env:
         # Attach a printer to the environment
         env.set_Stream(mosek.streamtype.log, streamprinter)
@@ -448,7 +228,7 @@ def max_quad_util_portf_mosek_plq(N, mu, cov, transaction_costs: Union[Iterable,
 
             dp, dm = np.zeros((n_assets, L-1)), np.zeros((n_assets, L-1))
             for i, transaction_cost in enumerate(transaction_costs):
-                dp[i, :] = np.diff(transaction_costs.cutpoints[L:-1])
+                dp[i, :] = np.diff(transaction_cost.cutpoints[L:-1])
                 dm[i, :] = np.diff(transaction_cost.cutpoints[1:L+1])[::-1]
                 
             # print(dp)
@@ -600,9 +380,10 @@ def max_quad_util_portf_mosek_plq(N, mu, cov, transaction_costs: Union[Iterable,
 
 
 
-def max_quad_util_portf_rehline_plq(N, mu, cov, transaction_costs: Union[Iterable, type[PLQLoss]], 
+def max_quad_util_portf_rehline_plq(N, mu, cov, transaction_costs: Iterable[PLQLoss], 
                                     risk_aversion=1.0, lb=None, ub=None, 
                                     max_iter=1000, tol=1e-6, verbose=False, trace_freq=100):
+    """Solves mean-variance problem with transaction cost with ReHLine"""
     if lb is None and ub is None:
         A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T]
         b = np.r_[-1.0, 1.0]
@@ -616,8 +397,6 @@ def max_quad_util_portf_rehline_plq(N, mu, cov, transaction_costs: Union[Iterabl
         A = np.r_[np.c_[np.ones(N), np.ones(N)*-1.0].T, np.eye(N), -np.eye(N)]
         b = np.r_[-1.0, 1.0, -np.ones(N)*lb, np.ones(N)*ub]
     
-    if isinstance(transaction_costs, PLQLoss):
-        transaction_costs = [transaction_costs]*N
     pf = MeanVariance(mu, cov, A, b, transaction_costs=transaction_costs)
     weights_rehlinepo = pf.max_quad_util_portf(
         tol=tol, risk_aversion=risk_aversion, 
@@ -627,8 +406,8 @@ def max_quad_util_portf_rehline_plq(N, mu, cov, transaction_costs: Union[Iterabl
     return weights_rehlinepo, pf._optimizer
 
 
-def eval_quad_util_plq(w, N, mu, cov, risk_aversion, transaction_cost: PLQLoss):
+def eval_quad_util_plq(w, N, mu, cov, risk_aversion, transaction_costs: Iterable[PLQLoss]):
     tc = 0
     for i in range(N):
-        tc += transaction_cost(w[i])
+        tc += transaction_costs[i](w[i])
     return 0.5*risk_aversion*(w.T @ cov @ w) - mu.T @ w + tc

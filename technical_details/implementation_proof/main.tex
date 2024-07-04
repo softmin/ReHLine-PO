@@ -1,0 +1,168 @@
+\documentclass[12pt, a4paper]{article}
+
+
+% A pretty common set of packages
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{color}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{engord}
+\usepackage{soul}
+\usepackage{textcomp}
+\usepackage{parskip}
+\usepackage{setspace}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{pifont}
+
+\pagestyle{fancy}
+\usepackage[UKenglish]{babel}
+\usepackage[UKenglish]{isodate}
+\usepackage[skip=2pt,font=footnotesize,justification=centering]{caption}
+\usepackage{natbib}
+\usepackage[colorlinks=true, 
+    linkcolor=blue,          % color of internal links
+    citecolor=blue,        % color of links to bibliography
+    filecolor=blue,      % color of file links
+    urlcolor=blue]{hyperref}
+
+% Do you prefer Sans Serif fonts?
+%\usepackage{sfmath}
+%\renewcommand{\familydefault}{\sfdefault} 
+
+
+
+
+% Make some additional useful commands
+\newcommand{\ie}{\emph{i.e.}\ }
+\newcommand{\eg}{\emph{e.g.}\ }
+\newcommand{\etal}{\emph{et al}}
+\newcommand{\sub}[1]{$_{\textrm{#1}}$}
+\newcommand{\super}[1]{$^{\textrm{#1}}$}
+\newcommand{\degC}{$^{\circ}$C}
+\newcommand{\wig}{$\sim$}
+\newcommand{\ord}[1]{\engordnumber{#1}}
+\newcommand{\num}[2]{$#1\,$#2}
+\newcommand{\range}[3]{$#1$-$#2\,$#3}
+\newcommand{\roughly}[2]{$\sim\!#1\,$#2}
+\newcommand{\area}[3]{$#1 \! \times \! #2\,$#3}
+\newcommand{\vol}[4]{$#1 \! \times \! #2 \! \times \! #3\,$#4}
+\newcommand{\cube}[1]{$#1 \! \times \! #1 \! \times \! #1$}
+\newcommand{\figref}[1]{Figure~\ref{#1}}
+\newcommand{\eqnref}[1]{Equation~\ref{#1}}
+\newcommand{\tableref}[1]{Table~\ref{#1}}
+\newcommand{\secref}[1]{Section \ref{#1}}
+\newcommand{\XC}{\emph{exchange-correlation}}
+\newcommand{\abinit}{\emph{ab initio}}
+\newcommand{\Abinit}{\emph{Ab initio}}
+\newcommand{\Lonetwo}{L1$_{2}$}
+\newcommand{\Dznt}{D0$_{19}$}
+\newcommand{\Dtf}{D8$_{5}$}
+\newcommand{\Btwo}{B$_{2}$}
+\newcommand{\fcc}{\emph{fcc}}
+\newcommand{\hcp}{\emph{hcp}}
+\newcommand{\bcc}{\emph{bcc}}
+\newcommand{\Ang}{{\AA}}
+\newcommand{\inverseAng}{{\AA}$^{-1}$}
+%\newcommand{\comment}[1]{}
+\newcommand{\comment}[1]{\textcolor{red}{[COMMENT: #1]}}
+\newcommand{\more}{\textcolor{red}{[MORE]}}
+\newcommand{\red}[1]{\textcolor{red}{#1}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand*{\V}[1]{\mathbf{#1}}
+
+% shortcuts for todolist
+\newlist{todolist}{itemize}{2}
+\setlist[todolist]{label=$\square$}
+
+\newtheorem{theorem}{Theorem}
+
+\newcommand{\cmark}{\ding{51}}%
+\newcommand{\xmark}{\ding{55}}%
+\newcommand{\done}{\rlap{$\square$}{\raisebox{2pt}{\large\hspace{1pt}\cmark}}%
+\hspace{-2.5pt}}
+\newcommand{\wontfix}{\rlap{$\square$}{\large\hspace{1pt}\xmark}}
+
+
+
+% Change this to modify look of header and footer
+\lhead{}
+\chead{}
+\rhead{}
+\lfoot{}
+\cfoot{\thepage{}}
+\rfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+
+\title{Reduction from Mean-Variance to ReHLine}
+\author{aorazalin }
+\date{July 2024}
+
+\begin{document}
+
+\maketitle
+
+
+\section{Introduction}
+Recall that the python solver class \texttt{ReHLineLinear} was implemented to solve the \texttt{ReHLine} optimization with the addition of a linear term. Luckily, precisely similar rehline algorithm can be used to solve the extended problem. A natural way to implement this would be to create a separate internal solver in C++, say \texttt{rehline\_linear\_solver} and a wrapper solver python class \texttt{ReHLineLinear} that would call this internal solver.
+Note that, however, the \texttt{ReHLineLinear} python class in \href{https://github.com/softmin/ReHLine-python/pull/4/commits/971579d231caeace0936b91d5f38fea1b82b72d8#diff-f3001c26be861b89a47a48e70adc111b7e82e512134d4cb607a260ceaa006453}{my implementation} didn't incorporate any additional C++ internal solver and solely used the original internal solver (so I haven't wrote any C++ code). This section will explain how this was done.
+
+\section{Derivation}
+
+
+Given the original \texttt{ReHLineLinear}($\V{U}, \V{V}, \V{S}, \V{T}, \V{A}, \V{b}, \V{\mu}$) problem
+\begin{align*}
+    \min_{\V{w} \in \R^d} \mathcal{P}^{linear}(\V{w}) \text{  s.t.} \;\; \V{Aw} + \V{b} \geq \V{0}
+\end{align*}
+where
+$$\mathcal{P}^{linear}(\V{w}) := \frac{1}{2} \V{w}^T \V{w} - \mu^T \V{w} + \sum_{i=1}^n \sum_{l=1}^L \text{ReLU}(u_{li} \V{w}^T \V{x_i} + v_{li}) + \sum_{i=1}^n \sum_{h=1}^H \text{ReHU}_{\tau_{hi}} (s_{hi} \V{w}^T \V{x_i} + t_{hi}) $$
+one can transform this problem into \texttt{ReHLine}($\V{U}, \V{V}', \V{S}, \V{T}', \V{A}, \V{b}'$) by completing the square for $\frac{1}{2} \V{w}^T \V{w} - \mu^T \V{w}$ and shifting $\V{w} \leftarrow \V{w} - \mu$:
+\begin{align*}
+    \min_{\V{w} \in \R^d} \mathcal{P}^{original}(\V{w}) - \frac{1}{2} \V{\mu}^T \V{\mu}, \;\text{s.t.} \;\; \V{Aw} + \V{b}' \geq \V{0}
+\end{align*}
+where 
+$$\mathcal{P}^{original}(\V{w}) := \frac{1}{2} \V{w}^T \V{w} + \sum_{i=1}^n \sum_{l=1}^L \text{ReLU}(u_{li} \V{w}^T \V{x_i} + v_{li}') + \sum_{i=1}^n \sum_{h=1}^H \text{ReHU}_{\tau_{hi}} (s_{hi} \V{w}^T \V{x_i} + t_{hi}') $$
+where parameters of the optimizer are shifted as $v_{li}' = v_{li} + u_{li} \V{\mu}^T \V{x}_i$, $t_{hi}' = t_{hi} + s_{hi} \V{\mu}^T \V{x}_i$, $\V{b}' = \V{b} + \V{A \mu}$ (*).
+
+Thus, \texttt{ReHLineLinear}($\V{U}, \V{V}, \V{S}, \V{T}, \V{A}, \V{b}, \V{\mu}$) can be solved like this:
+\begin{enumerate}
+    \item Shift parameters $\V{V}, \V{T}, \V{b} \rightarrow \V{V}', \V{T}', \V{b}'$
+    \item Solve $\V{w}^o$, $\V{\xi}^o$, $\V{\Lambda}^o$, $\V{\Gamma}^o$, $\mathcal{P}^o$, $\mathcal{D}^o \leftarrow$ \texttt{ReHLine}($\V{U}, \V{V}', \V{S}, \V{T}', \V{A}, \V{b}'$)
+    \item Un-shift results
+    \begin{itemize}
+        \item $\V{w} = \V{w}^o + \mu$ 
+        \item $\V{\xi}, \V{\Lambda}, \V{\Gamma} = \V{\xi}^o, \V{\Lambda}^o, \V{\Gamma}^o$
+        \item $\mathcal{P} = \mathcal{P}^o - \frac{1}{2} \mu^T \mu$
+        \item $\mathcal{D} =\mathcal{D}^o + \frac{1}{2} \mu^T \mu$
+    \end{itemize}
+\end{enumerate}
+In fact, the algorithm above is precisely equal to running coordinate descent on the \texttt{ReHLineLinear} problem. 
+
+Apart from what we covered, we haven't only covered why dual variables don't change when we un-shift back to the original problem. It is pretty clear once we look at dual objective functions of both problems:
+
+\begin{align*}
+\mathcal{D}^{linear}(\V{\xi}, \V{\Lambda}, \V{\Gamma}) := & \frac{1}{2} ||\V{A}^T \V{\xi} + \V{\mu} - \V{\bar{U}_{(3)}} \text{vec}(\V{\Lambda}) - \V{\bar{S}_{(3)}} \text{vec} (\V{\Gamma})||_2^2 + \frac{1}{2}\text{vec}(\V{\Gamma})^T \text{vec}(\V{\Gamma}) 
+\\ & + \V{\xi}^T \V{b} - Tr(\V{\Lambda}^T \V{V}) - Tr(\V{\Gamma}^T \V{T})
+\end{align*}
+and
+\begin{align*}
+\mathcal{D}^{original}(\V{\xi}, \V{\Lambda}, \V{\Gamma}) := & \frac{1}{2} ||\V{A}^T \V{\xi} - \V{\bar{U}_{(3)}} \text{vec}(\V{\Lambda}) - \V{\bar{S}_{(3)}} \text{vec} (\V{\Gamma})||_2^2 + \frac{1}{2}\text{vec}(\V{\Gamma})^T \text{vec}(\V{\Gamma}) 
+\\ & + \V{\xi}^T \V{b} - Tr(\V{\Lambda}^T \V{V}) - Tr(\V{\Gamma}^T \V{T})
+\end{align*}
+by shifting parameters $\V{T}, \V{V}, \V{b}$ as above one can easily show
+$$\mathcal{D}^{linear}(\V{\xi}, \V{\Lambda}, \V{\Gamma} \:|\: \V{A}, \V{U}, \V{V}, \V{S}, \V{T}, \V{A}, \V{b}, \mu) = \mathcal{D}^{original}(\V{\xi}, \V{\Lambda}, \V{\Gamma} \:|\: \V{A}, \V{U}, \V{V}', \V{S}, \V{T}', \V{A}, \V{b}') + \frac{1}{2}\mu^T\mu$$
+where $\V{T}', \V{V}', \V{b}'$ are defined as in (*). 
+
+% \bibliographystyle{chicago}
+% \bibliography{Literature}
+\end{document}
+
+
+

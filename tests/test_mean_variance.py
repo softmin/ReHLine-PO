@@ -1,3 +1,23 @@
+r"""
+Solve a problem:
+
+.. math::
+
+   \min_{w \in \mathbb{R}^n} -\mu^T w + \frac{\alpha}{2} w^T S w + \sum_i \phi_i(w_i)
+
+subject to:
+
+.. math::
+
+   w^T 1 = 1 \quad \text{and} \quad w \geq 0
+
+where:
+
+.. math::
+
+   \phi_i(w) = \text{transaction_cost} \cdot |w - w^{\text{pre}_i}|
+"""
+
 import os
 
 import pandas as pd
@@ -17,10 +37,6 @@ def resource(name):
 def get_data():
     return pd.read_csv(resource("stock_prices.csv"), parse_dates=True, index_col="date")
 
-"""
-min_{w in R^n} -mu' w + alpha/2 * w' S w + sum_i phi_i(w_i) s.t. w'1 = 1 & w >= 0
-where phi_i(w) = transaction_cost * |w - w^pre_i|
-"""
 
 prices = get_data()
 mu = expected_returns.mean_historical_return(prices)

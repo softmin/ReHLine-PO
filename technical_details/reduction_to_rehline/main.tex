@@ -1,0 +1,52 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{hyperref}
+
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand*{\V}[1]{\mathbf{#1}}
+
+\title{Reduction from Mean-Variance to ReHLine}
+\author{aorazalin }
+\date{July 2024}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+This document shows how ReHLine algorithm can be applied to the Mean-Variance problem with an addition of piece-wise linear convex cost functions.
+
+\section{Problem statement}
+Suppose we are given a task of a classic Markowitz portfolio optimization problem with additional piece-wise linear transaction cost function (which is also convex). One could write the original problem as
+
+\begin{align*}
+\min_{\mathbf{w} \in \R^n} \frac{\alpha}{2} \mathbf{w}^T \mathbf{G} \mathbf{w} - \mathbf{\mu}^T \mathbf{w} + \sum_{i=1}^n \phi_i(w_i), \; \; \; \; \text{s.t. } \mathbf{A w} + \mathbf{b} \geq 0
+\end{align*}
+where $\phi_i(w_i) = p_{il} w_i + q_{il}$ for $w_i \in [d_{il}, d_{il+1}]$ for $l=1,2,...,L_i$. Here, $d_{i0} \text{ and } d_{iL_i+1}$ are defined as $-\infty$ and $\infty$, respectively. 
+
+\section{Reduction}
+Let's transform the problem into a ReHLine-like framework. Let $\mathbf{G =LL^T}$ be Cholesky decomposition of a positive-definite matrix $\mathbf{G}$. Mapping the problem above by transforming $\mathbf{w}' = \sqrt{\alpha} \mathbf{L}^T\mathbf{w}$, we get
+
+\begin{align*}
+\min_{\mathbf{w} \in \R^n} \frac{1}{2} \mathbf{w}^T \mathbf{w} - \mathbf{\tilde{\mu}}^T \mathbf{w} + \sum_{i=1}^n \phi_i(\mathbf{x_i}^T \mathbf{w}), \;\;\;\; \text{s.t. } \mathbf{\tilde{A}w} + \mathbf{b} \geq 0
+\end{align*}
+where $\mathbf{\tilde{\mu}} = \frac{1}{\sqrt{\alpha}} \mathbf{L}^{-1} \mathbf{\mu}$, 
+$\mathbf{x_i} = \frac{1}{\sqrt{\alpha}} \V{L}^T_{i,:}$, 
+and $\tilde{\mathbf{A}} = \frac{1}{\sqrt{\alpha}} \mathbf{A} (\V{L}^T)^{-1}$.
+
+In a similar spirit to the ReHLine paper, let's rewrite piece-wise linear functions $\phi_i$ in terms of the sum of ReLU functions:
+\begin{align*}
+\phi_i(w) = q_{i0} + p_{i0}w + \sum_{l=1}^{L_i} \text{ReLU}((p_{il}-p_{il-1})(w-d_{il}))
+\end{align*}
+
+Omitting constant terms, the problem becomes
+\begin{align*}
+\min_{\mathbf{w} \in \R^n} \frac{1}{2} \mathbf{w}^T \mathbf{w} - (\mathbf{\tilde{\mu}}- & \mathbf{p_0})^T \mathbf{w} + \\ & \sum_{i=1}^n \sum_{l=1}^{L_i} \text{ReLU}((p_{il} - p_{il-1})(\mathbf{x_i}^T \mathbf{w} - d_{il})), \;\; \text{s.t. } \mathbf{\tilde{A}w} + \mathbf{b} \geq 0
+\end{align*} 
+
+Finally, one could easily get a ReHLine minimization problem (equation \#4 in the original \href{https://openreview.net/pdf?id=3pEBW2UPAD}{paper}) by completing the square for $\mathbf{w}^T \mathbf{w}$, which can be optimized as usual. 
+
+\end{document}

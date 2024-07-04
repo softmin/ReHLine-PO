@@ -2,7 +2,6 @@ import numpy as np
 from numpy import linalg as LA
 
 from rehline_po.optimization.base import Portfolio
-from rehline_po.risk_models.factor_model import FactorModel
 from typing import Dict, List, Tuple, Callable, Union
 from rehline import ReHLineLinear, ReHLoss, ReHLineQuad
 from plqcom import PLQLoss, plq_to_rehloss, affine_transformation
@@ -16,7 +15,7 @@ class MeanVariance(Portfolio):
     """
     def __init__(self,
                  mu: np.ndarray,
-                 cov: Union[np.ndarray, FactorModel],
+                 cov: np.ndarray,
                  A: np.ndarray,
                  b: np.ndarray,
                  cov_sqrt: np.ndarray = None,
@@ -36,10 +35,10 @@ class MeanVariance(Portfolio):
         self.buy_cost = buy_cost
         self.sell_cost = sell_cost
         self.transaction_costs = transaction_costs
-        # if self.cov_sqrt:
-        #     assert np.isclose(2.0*LA.norm(self.cov_sqrt @ self.cov_sqrt.T - self.cov)
-        #                         / (LA.norm(self.cov_sqrt @ self.cov_sqrt.T) + LA.norm(self.cov)), 1e-4), \
-        #             "Invalid sqrt of a covariance matrix supplied!"
+        if self.cov_sqrt:
+            assert np.isclose(2.0*LA.norm(self.cov_sqrt @ self.cov_sqrt.T - self.cov)
+                                / (LA.norm(self.cov_sqrt @ self.cov_sqrt.T) + LA.norm(self.cov)), 1e-4), \
+                    "Invalid sqrt of a covariance matrix supplied!"
         self.U, self.V = self._construct_relu_coefs()
         
 
@@ -55,75 +54,29 @@ class MeanVariance(Portfolio):
         where :math:`\phi_i` is a piecewise linear convex function (typically modelling 
         transaction cost + market impact)
         """
-        if not isinstance(self.cov, np.ndarray):
-            U_scaled, V_scaled = self.U / risk_aversion, self.V / risk_aversion
-            mu_scaled = self.mu / risk_aversion
-            if verbose > 0:
-                self._optimizer = ReHLineQuad(
-                    loss='custom',
-                    C=risk_aversion,
-                    A=self.A,
-                    b=self.b,
-                    U=U_scaled,
-                    V=V_scaled,
-                    G=self.cov.get_cov(),
-                    invG=self.cov.get_invcov(),
-                    rightmult_invG=self.cov.invcov_rightmult,
-                    rightmult_G=self.cov.cov_rightmult,
-                    mu=mu_scaled,
-                    max_iter=max_iter,
-                    tol=tol,
-                    verbose=verbose,
-                    trace_freq=trace_freq,
-                )
-            else:
-                self._optimizer = ReHLineQuad(
-                    loss='custom',
-                    C=risk_aversion,
-                    A=self.A,
-                    b=self.b,
-                    U=U_scaled,
-                    V=V_scaled,
-                    rightmult_invG=self.cov.invcov_rightmult,
-                    rightmult_G=self.cov.cov_rightmult,
-                    mu=mu_scaled,
-                    max_iter=max_iter,
-                    tol=tol,
-                    verbose=verbose,
-                    trace_freq=trace_freq,
-                )
-            self._optimizer.fit(X=np.eye(self.n_assets))
-            return self._optimizer.coef_
-        else:
-            if not self.cov_sqrt:
-                self.cov_sqrt = LA.cholesky(self.cov)
-            if not self.cov_sqrt_inv:
-                self.cov_sqrt_inv = LA.inv(self.cov_sqrt)
+        if not self.cov_sqrt:
+            self.cov_sqrt = LA.cholesky(self.cov)
+        if not self.cov_sqrt_inv:
+            self.cov_sqrt_inv = LA.inv(self.cov_sqrt)
 
-            X = self.cov_sqrt_inv.T / np.sqrt(risk_aversion)
-            A_tilde = self.A @ X
-            mu_tilde = X.T @ self.mu
+        X = self.cov_sqrt_inv.T / np.sqrt(risk_aversion)
+        A_tilde = self.A @ X
+        mu_tilde = X.T @ self.mu
 
-            # print("C:", risk_aversion)
-            # print("A:", A_tilde)
-            # print("b:", self.b)
-            # print("U:", self.U)
-            # print("V:", self.V)
-            # print("mu:", mu_tilde)
-            self._optimizer = ReHLineLinear(
-                C=risk_aversion, 
-                A=A_tilde, 
-                b=self.b,
-                U=self.U,
-                V=self.V,
-                mu=mu_tilde,
-                max_iter=max_iter,
-                tol=tol,
-                verbose=verbose,
-                trace_freq=trace_freq,
-            )
-            self._optimizer.fit(X=X)
-            return X @ self._optimizer.coef_
+        self._optimizer = ReHLineLinear(
+            C=risk_aversion, 
+            A=A_tilde, 
+            b=self.b,
+            U=self.U,
+            V=self.V,
+            mu=mu_tilde,
+            max_iter=max_iter,
+            tol=tol,
+            verbose=verbose,
+            trace_freq=trace_freq,
+        )
+        self._optimizer.fit(X=X)
+        return X @ self._optimizer.coef_
 
 
     def _construct_relu_coefs(self) -> Tuple[np.ndarray, np.ndarray]:
